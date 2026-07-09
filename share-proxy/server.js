@@ -1,7 +1,7 @@
 /**
  * Roblox Share Link Resolver Proxy
- * Follows roblox.com/share?code=... redirects and returns the numeric asset ID.
- * Deploy to Render (or any Node host) — set the URL in your Roblox server script.
+ * Resolves roblox.com/share?code=... to a numeric asset ID by following
+ * HTTP redirects AND reading the page body (Roblox uses JS redirects).
  *
  * GET /resolve?url=<encoded_share_or_catalog_url>
  * → 200  { id: 107620597045824 }
@@ -9,36 +9,34 @@
  * → 404  { error: "...", finalUrl: "..." }
  */
 
-const https  = require("https");
-const http   = require("http");
-const PORT   = process.env.PORT || 3000;
-const MAX_URL_LEN    = 512;
-const ALLOWED_HOSTS  = new Set(["roblox.com", "www.roblox.com"]);
-const ALLOWED_PROTOS = new Set(["https:"]);
+const https = require("https");
+const http  = require("http");
+const PORT  = process.env.PORT || 3000;
 
-/** Throw if the URL is not a safe Roblox https URL. */
+const MAX_URL_LEN   = 512;
+const ALLOWED_HOSTS = new Set(["roblox.com", "www.roblox.com"]);
+
+/** Throw if the initial URL is not a safe Roblox https URL. */
 function assertSafe(urlStr) {
   let parsed;
   try { parsed = new URL(urlStr); }
   catch { throw new Error("Invalid URL"); }
-
-  if (!ALLOWED_PROTOS.has(parsed.protocol))
+  if (parsed.protocol !== "https:")
     throw new Error("Only https:// URLs are accepted");
-
   if (!ALLOWED_HOSTS.has(parsed.hostname))
     throw new Error(`Host '${parsed.hostname}' is not allowed`);
-
   return parsed;
 }
 
 /**
- * Follow redirects until we reach a non-redirect response or run out of hops.
- * Only the INITIAL URL is validated; redirect destinations are followed freely
- * because Roblox share links may hop through intermediate CDN/shortener URLs
- * before landing on the catalog page.
- * Returns the final URL (string).
+ * Follow HTTP redirects freely (only initial URL is validated).
+ * On the final non-redirect response, read and return the body so we can
+ * search it for an asset ID — Roblox share links use JS redirects, not HTTP
+ * redirects, so the ID lives in the page HTML rather than the Location header.
+ *
+ * Returns { finalUrl, body }
  */
-function followRedirects(startUrl, max = 10) {
+function fetchFinal(startUrl, max = 10) {
   return new Promise((resolve, reject) => {
     let remaining = max;
 
@@ -49,49 +47,57 @@ function followRedirects(startUrl, max = 10) {
 
       const mod = parsed.protocol === "https:" ? https : http;
 
-      const req = mod.get(
-        url,
-        {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; RobloxShareResolver/1.0)",
-            "Accept":     "text/html,application/xhtml+xml,*/*",
-          },
+      const req = mod.get(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Accept":     "text/html,application/xhtml+xml,*/*;q=0.9",
+          "Accept-Language": "en-US,en;q=0.9",
         },
-        (res) => {
+      }, (res) => {
+        const { statusCode, headers } = res;
+
+        // Follow HTTP redirects
+        if ([301, 302, 303, 307, 308].includes(statusCode) && headers.location && remaining-- > 0) {
           res.resume();
-
-          const { statusCode, headers } = res;
-
-          if (
-            [301, 302, 303, 307, 308].includes(statusCode) &&
-            headers.location &&
-            remaining-- > 0
-          ) {
-            const next = new URL(headers.location, url).href;
-            return step(next);
-          }
-
-          resolve(url);
+          return step(new URL(headers.location, url).href);
         }
-      );
+
+        // Final response — read body (cap at 256 KB)
+        const chunks = [];
+        let size = 0;
+        res.on("data", (chunk) => {
+          size += chunk.length;
+          if (size <= 262144) chunks.push(chunk);
+        });
+        res.on("end", () => resolve({ finalUrl: url, body: Buffer.concat(chunks).toString("utf8") }));
+        res.on("error", reject);
+      });
 
       req.on("error", reject);
-      req.setTimeout(8000, () => { req.destroy(); reject(new Error("Request timed out")); });
+      req.setTimeout(10000, () => { req.destroy(); reject(new Error("Request timed out")); });
     }
 
     step(startUrl);
   });
 }
 
-/** Extract a numeric Roblox asset ID from a URL string. */
-function extractId(url) {
+/**
+ * Try to extract a numeric Roblox asset ID from a URL string or HTML body.
+ * Patterns ordered from most to least specific.
+ */
+function extractId(url, body = "") {
+  const haystack = url + "\n" + body;
   const patterns = [
     /roblox\.com\/catalog\/(\d+)/,
     /roblox\.com\/marketplace\/asset\/(\d+)/,
-    /[?&]id=(\d+)/,
+    /"AssetId"\s*:\s*(\d+)/,
+    /"assetId"\s*:\s*(\d+)/,
+    /data-asset-id="(\d+)"/,
+    /"itemId"\s*:\s*(\d+)/,
+    /\/(\d{8,})(?:\/|"|')/,   // bare large number segment (8+ digits) as last resort
   ];
   for (const re of patterns) {
-    const m = url.match(re);
+    const m = haystack.match(re);
     if (m) return parseInt(m[1], 10);
   }
   return null;
@@ -101,9 +107,9 @@ function extractId(url) {
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
 
-  const reqUrl = new URL(req.url, `http://localhost`);
+  const reqUrl = new URL(req.url, "http://localhost");
 
-  // Landing page — satisfies Render web service check + looks legit
+  // Landing page
   if (reqUrl.pathname === "/") {
     res.writeHead(200, { "Content-Type": "text/html" });
     return res.end(`<!DOCTYPE html>
@@ -137,7 +143,7 @@ const server = http.createServer(async (req, res) => {
 </html>`);
   }
 
-  // Health-check / ping (point UptimeRobot at /ping or /health)
+  // Health / ping
   if (reqUrl.pathname === "/health" || reqUrl.pathname === "/ping") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end("ok");
@@ -160,7 +166,6 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ error: `URL exceeds ${MAX_URL_LEN} character limit` }));
   }
 
-  // Validate the target URL before touching the network
   try { assertSafe(target); }
   catch (e) {
     res.writeHead(400, { "Content-Type": "application/json" });
@@ -168,8 +173,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    const finalUrl = await followRedirects(target);
-    const id       = extractId(finalUrl);
+    const { finalUrl, body } = await fetchFinal(target);
+    const id = extractId(finalUrl, body);
 
     if (!id) {
       res.writeHead(404, { "Content-Type": "application/json" });
