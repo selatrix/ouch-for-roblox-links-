@@ -32,20 +32,24 @@ function assertSafe(urlStr) {
 }
 
 /**
- * Follow redirects, re-validating each hop against the allowlist.
+ * Follow redirects until we reach a non-redirect response or run out of hops.
+ * Only the INITIAL URL is validated; redirect destinations are followed freely
+ * because Roblox share links may hop through intermediate CDN/shortener URLs
+ * before landing on the catalog page.
  * Returns the final URL (string).
  */
-function followRedirects(startUrl, max = 8) {
+function followRedirects(startUrl, max = 10) {
   return new Promise((resolve, reject) => {
     let remaining = max;
 
     function step(url) {
-      // Validate before every request
       let parsed;
-      try { parsed = assertSafe(url); }
-      catch (e) { return reject(e); }
+      try { parsed = new URL(url); }
+      catch { return reject(new Error("Invalid redirect URL: " + url)); }
 
-      const req = https.get(
+      const mod = parsed.protocol === "https:" ? https : http;
+
+      const req = mod.get(
         url,
         {
           headers: {
@@ -54,7 +58,7 @@ function followRedirects(startUrl, max = 8) {
           },
         },
         (res) => {
-          res.resume(); // drain body; we only care about headers
+          res.resume();
 
           const { statusCode, headers } = res;
 
