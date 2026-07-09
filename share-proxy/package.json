@@ -1,0 +1,12 @@
+{
+  "name": "roblox-share-resolver",
+  "version": "1.0.0",
+  "description": "Proxy that resolves Roblox share links to numeric asset IDs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
