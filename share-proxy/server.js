@@ -99,10 +99,10 @@ const server = http.createServer(async (req, res) => {
 
   const reqUrl = new URL(req.url, `http://localhost`);
 
-  // Health-check
-  if (reqUrl.pathname === "/" || reqUrl.pathname === "/health") {
+  // Health-check / ping (point UptimeRobot at /ping or /health)
+  if (["/" , "/health", "/ping"].includes(reqUrl.pathname)) {
     res.writeHead(200, { "Content-Type": "text/plain" });
-    return res.end("Roblox Share Resolver — GET /resolve?url=<share_url>");
+    return res.end("ok");
   }
 
   if (reqUrl.pathname !== "/resolve") {
