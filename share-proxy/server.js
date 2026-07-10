@@ -86,18 +86,29 @@ function fetchFinal(startUrl, max = 10) {
  * Patterns ordered from most to least specific.
  */
 function extractId(url, body = "") {
-  const haystack = url + "\n" + body;
-  const patterns = [
+  // 1. URL first — reliable if there was a real HTTP redirect to /catalog/<id>/
+  const urlPatterns = [
     /roblox\.com\/catalog\/(\d+)/,
     /roblox\.com\/marketplace\/asset\/(\d+)/,
-    /"AssetId"\s*:\s*(\d+)/,
-    /"assetId"\s*:\s*(\d+)/,
-    /data-asset-id="(\d+)"/,
-    /"itemId"\s*:\s*(\d+)/,
-    /\/(\d{8,})(?:\/|"|')/,   // bare large number segment (8+ digits) as last resort
   ];
-  for (const re of patterns) {
-    const m = haystack.match(re);
+  for (const re of urlPatterns) {
+    const m = url.match(re);
+    if (m) return parseInt(m[1], 10);
+  }
+  // 2. Page body — Roblox embeds item data in __NEXT_DATA__ JSON and HTML
+  const bodyPatterns = [
+    /"assetId"\s*:\s*(\d+)/,
+    /"AssetId"\s*:\s*(\d+)/,
+    /"itemId"\s*:\s*(\d+)/,
+    /"ItemId"\s*:\s*(\d+)/,
+    /"id"\s*:\s*(\d+)\s*,\s*"[Nn]ame"/,
+    /data-asset-id="(\d+)"/,
+    /data-item-id="(\d+)"/,
+    /\/catalog\/(\d+)\//,
+    /\/marketplace\/asset\/(\d+)\//,
+  ];
+  for (const re of bodyPatterns) {
+    const m = body.match(re);
     if (m) return parseInt(m[1], 10);
   }
   return null;
